@@ -1,5 +1,5 @@
 def calc_e(i0, xl, yl, zl, x, y):
-    return 10 ** 6 * i0 * ((zl ** 2) / ((x - xl) ** 2 + (y - yl) ** 2 + zl ** 2))
+    return 10 ** 6 * i0 * ((zl ** 2) / ((x - xl) ** 2 + (y - yl) ** 2 + zl ** 2) ** 2)
 
 
 def is_in_the_circle(x, y, xc, yc, r):
