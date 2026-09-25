@@ -10,17 +10,17 @@ import core
 
 
 FIELDS = (
-    ("w", "Ширина W, мм", "2000"),
-    ("h", "Высота H, мм", "2000"),
-    ("w_res", "Ширина, пикс.", "400"),
-    ("h_res", "Высота, пикс.", "400"),
-    ("xl", "Источник xL, мм", "0"),
-    ("yl", "Источник yL, мм", "0"),
-    ("zl", "Источник zL, мм", "1000"),
-    ("i0", "I0, Вт/ср", "1"),
-    ("xc", "Центр круга x, мм", "0"),
-    ("yc", "Центр круга y, мм", "0"),
-    ("r", "Радиус, мм", "800"),
+    ("w", "W, мм", "2000"),
+    ("h", "H, мм", "2000"),
+    ("w_res", "W_res, пикс.", "400"),
+    ("h_res", "H_res, пикс.", "400"),
+    ("xl", "x_L, мм", "0"),
+    ("yl", "y_L, мм", "0"),
+    ("zl", "z_L, мм", "1000"),
+    ("i0", "I_0, Вт/ср", "1"),
+    ("xc", "Центр круга x_c, мм", "0"),
+    ("yc", "Центр круга y_c, мм", "0"),
+    ("r", "Радиус r, мм", "800"),
 )
 
 
@@ -139,7 +139,7 @@ class LabWindow:
         ttk.Label(result, text="Распределение освещённости").pack(anchor="w")
         self.image = ttk.Label(result, text="Нажмите «Рассчитать»", anchor="center")
         self.image.pack(fill="both", expand=True, pady=(5, 12))
-        ttk.Label(result, text="Сечение по X через центр круга (y = yc)").pack(anchor="w")
+        ttk.Label(result, text="Сечение по X через центр круга, y = y_c").pack(anchor="w")
         self.graph = tk.Canvas(result, width=550, height=175, bg="white")
         self.graph.pack(fill="x", pady=(5, 10))
         self.details = ttk.Label(result, text="", justify="left", font="TkFixedFont")
