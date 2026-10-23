@@ -11,7 +11,6 @@ def unit(vector):
 
 
 def ray_sphere_point(x, y, zo, xc, yc, zc, r):
-    # Луч O + t * (P - O), где O = (0, 0, zo), P = (x, y, 0).
     direction = (x, y, -zo)
     offset = (-xc, -yc, zo - zc)
     a = dot(direction, direction)
@@ -21,7 +20,6 @@ def ray_sphere_point(x, y, zo, xc, yc, zc, r):
     if discriminant < 0:
         return None
 
-    # Выбираем ближайшее положительное пересечение со сферой.
     t = (-b - sqrt(discriminant)) / (2 * a)
     if t <= 0:
         return None
@@ -29,8 +27,6 @@ def ray_sphere_point(x, y, zo, xc, yc, zc, r):
 
 
 def is_sphere_in_view(xc, yc, zc, r, zo, w, h):
-    # Расстояния до четырёх боковых плоскостей пирамиды видимости.
-    # Как в lab1, X идёт по высоте экрана, Y — по ширине.
     for coordinate, size in ((xc, h), (yc, w)):
         slope = size / (2 * zo)
         distance = (slope * (zo - zc) - abs(coordinate)) / sqrt(1 + slope ** 2)
@@ -64,20 +60,16 @@ def calc_l(point, lights, zo, xc, yc, zc, r, kd, ks, ke, c):
         distance = sqrt(distance_squared)
         s = tuple(value / distance for value in to_light)
 
-        # I(alpha) = I0 * cos(alpha): источник излучает вдоль -Z.
         cos_alpha = max(0, s[2])
         cos_theta = max(0, min(1, dot(s, n)))
         if cos_alpha == 0 or cos_theta == 0:
             continue
 
-        # Закон обратных квадратов; 10**6 переводит мм² в м².
         li = 10 ** 6 * i0 * cos_alpha / distance_squared
 
-        # Именно h = (v + s) / 2 из методички, стр. 50.
         h = tuple((vi + si) / 2 for vi, si in zip(v, s))
         cos_h = max(0, min(1, dot(h, n)))
 
-        # Формула (3.4.5.3): L = Li * (Kd*(s·n) + c*Ks*(h·n)**ke).
         result += li * (kd * cos_theta + c * ks * cos_h ** ke)
 
     return result
@@ -102,7 +94,6 @@ def calc_report_points(xc, yc, zc, r, zo):
     distance = sqrt(dot(to_observer, to_observer))
     v = unit(to_observer)
     axis_x = unit((v[2], 0, -v[0]))
-    # Три разные точки внутри видимой части сферы, даже вблизи наблюдателя.
     angle = min(pi / 6, acos(r / distance) / 2)
     result = []
     for name, theta in (("Ближняя", 0), ("-X", -angle), ("+X", angle)):
