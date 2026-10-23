@@ -109,6 +109,8 @@ def dot(a, b):
 
 def unit(vector):
     length = hypot(*vector)
+    if length == 0:
+        return tuple(0.0 for _ in vector)
     return tuple(value / length for value in vector)
 
 
@@ -122,6 +124,8 @@ def integrate(spectrum):
 
 def normalize_spectrum(spectrum):
     total = integrate(spectrum)
+    if total == 0:
+        return (0.0,) * len(WAVELENGTHS)
     return tuple(value / total for value in spectrum)
 
 
@@ -161,6 +165,8 @@ def camera_frame(xc, yc, zc, zo):
     observer = np.array((0.0, 0.0, zo))
     center = np.array((xc, yc, zc), dtype=float)
     forward = np.array(unit(center - observer))
+    if not np.any(forward):
+        forward = np.array((0.0, 0.0, -1.0))
     axis_x = np.array((1.0, 0.0, 0.0))
     if abs(dot(axis_x, forward)) > 0.999999:
         axis_x = np.array((0.0, 1.0, 0.0))
@@ -170,54 +176,59 @@ def camera_frame(xc, yc, zc, zo):
     return observer, forward, axis_x, axis_y, distance
 
 
+def intersect_sphere(observer, directions, center, r):
+    directions = np.asarray(directions, dtype=float)
+    toward_center = np.asarray(center) - observer
+    projection = directions @ toward_center
+    perpendicular = np.cross(directions, toward_center)
+    discriminant = r ** 2 - np.sum(perpendicular ** 2, axis=-1)
+    root = np.sqrt(np.maximum(discriminant, 0))
+    near, far = projection - root, projection + root
+    epsilon = 1e-10 * max(1, r)
+    distance = np.where(near > epsilon, near, far)
+    valid = (r > 0) & (discriminant >= 0) & (distance > epsilon)
+    return distance, valid
+
+
 def ray_sphere_point(x, y, zo, xc, yc, zc, r):
     observer, forward, axis_x, axis_y, distance = camera_frame(xc, yc, zc, zo)
-    c = distance ** 2 - r ** 2
-    discriminant = distance ** 2 * r ** 2 - (x ** 2 + y ** 2) * c
-    if discriminant < 0:
-        return None
-    t = c / (distance ** 2 + sqrt(discriminant))
-    if t <= 0:
-        return None
-    direction = distance * forward + x * axis_x + y * axis_y
-    return tuple(observer + t * direction)
-
-
-def is_sphere_in_view(xc, yc, zc, r, zo, w, h):
-    distance = hypot(xc, yc, zc - zo)
-    if distance <= r:
-        return False
-    projected_radius = r / sqrt(1 - (r / distance) ** 2)
-    return projected_radius <= min(w, h) / 2 + 1e-9 * r
+    focal = distance if distance > 0 else max(r, 1)
+    direction = np.array(unit(focal * forward + x * axis_x + y * axis_y))
+    t, valid = intersect_sphere(observer, direction, (xc, yc, zc), r)
+    return tuple(observer + t * direction) if valid else None
 
 
 def calc_all_points_on_sphere(xc, yc, zc, r, zo, w, h, w_res, h_res):
     observer, forward, axis_x, axis_y, distance = camera_frame(xc, yc, zc, zo)
     x = -h / 2 + (np.arange(h_res)[:, None] + 0.5) * (h / h_res)
     y = -w / 2 + (np.arange(w_res)[None, :] + 0.5) * (w / w_res)
-    c = distance ** 2 - r ** 2
-    discriminant = distance ** 2 * r ** 2 - (x ** 2 + y ** 2) * c
-    t = c / (distance ** 2 + np.sqrt(np.maximum(discriminant, 0)))
-    visible = (discriminant >= 0) & (t > 0)
+    focal = distance if distance > 0 else max(r, 1)
+    directions = (focal * forward + x[..., None] * axis_x + y[..., None] * axis_y)
+    directions /= np.linalg.norm(directions, axis=-1, keepdims=True)
+    t, visible = intersect_sphere(observer, directions, (xc, yc, zc), r)
     rows, columns = np.nonzero(visible)
-    directions = (distance * forward + x[rows, 0, None] * axis_x
-                   + y[0, columns, None] * axis_y)
-    coordinates = observer + t[visible, None] * directions
+    coordinates = observer + t[visible, None] * directions[visible]
     return dict(zip(zip(rows.tolist(), columns.tolist()), coordinates.tolist()))
 
 
-def calc_light_factor(point, light, xc, yc, zc, r):
+def calc_light_factor(point, light, xc, yc, zc, r, inside=False):
     point = np.asarray(point)
     xl, yl, zl, i0, dx, dy, dz, _ = light
+    if r == 0 or (inside and hypot(xl - xc, yl - yc, zl - zc) > r):
+        return np.zeros(point.shape[:-1])
     n = (point - (xc, yc, zc)) / r
+    if inside:
+        n = -n
     to_light = (xl, yl, zl) - point
     distance_squared = np.sum(to_light ** 2, axis=-1)
-    s = to_light / np.sqrt(distance_squared)[..., None]
+    s = np.divide(to_light, np.sqrt(distance_squared)[..., None],
+                   out=np.zeros_like(to_light, dtype=float), where=distance_squared[..., None] > 0)
     direction = unit((dx, dy, dz))
     cos_alpha = np.clip(-np.sum(s * direction, axis=-1), 0, 1)
     cos_theta = np.clip(np.sum(s * n, axis=-1), 0, 1)
 
-    return 10 ** 6 * i0 * cos_alpha * cos_theta / (pi * distance_squared)
+    return np.divide(10 ** 6 * i0 * cos_alpha * cos_theta, pi * distance_squared,
+                     out=np.zeros_like(distance_squared, dtype=float), where=distance_squared > 0)
 
 
 def prepare_lights(lights):
@@ -225,15 +236,16 @@ def prepare_lights(lights):
             for xl, yl, zl, i0, dx, dy, dz, spectrum in lights]
 
 
-def calc_images(lights, xc, yc, zc, r, reflection, points):
+def calc_images(lights, xc, yc, zc, r, reflection, points, inside=False):
     lights = prepare_lights(lights)
     coordinates = np.asarray(list(points.values()), dtype=np.float64).reshape(-1, 3)
-    spectra = np.array([light[-1] for light in lights])
+    spectra = np.array([light[-1] for light in lights], dtype=float).reshape(-1, len(WAVELENGTHS))
     light_colors = spectrum_to_rgb(spectra)
     reflection_rgb = reflection_to_rgb(reflection)
 
-    factors = np.column_stack([calc_light_factor(coordinates, light, xc, yc, zc, r)
-                               for light in lights])
+    factors = np.empty((len(coordinates), len(lights)))
+    for i, light in enumerate(lights):
+        factors[:, i] = calc_light_factor(coordinates, light, xc, yc, zc, r, inside)
     spectral = factors @ spectra
     spectral *= reflection
     xyz = spectrum_to_xyz(spectral)
@@ -281,6 +293,16 @@ def convert_to_gray(pixels):
 def calc_report_points(xc, yc, zc, r, zo):
     to_observer = (-xc, -yc, zo - zc)
     _, _, axis_x, _, distance = camera_frame(xc, yc, zc, zo)
+    if r <= 0:
+        return []
+    if distance <= r:
+        focal = distance if distance > 0 else max(r, 1)
+        result = []
+        for name, x in (("Ближняя", 0), ("-X", -focal / sqrt(3)), ("+X", focal / sqrt(3))):
+            point = ray_sphere_point(x, 0, zo, xc, yc, zc, r)
+            if point is not None:
+                result.append((name, point))
+        return result
     v = unit(to_observer)
     angle = min(pi / 6, acos(r / distance) / 2)
     result = []

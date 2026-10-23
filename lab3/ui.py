@@ -50,18 +50,12 @@ def read_number(value, label, integer=False):
     return number
 
 
-def check_limits(params, labels, limits):
-    for key, (low, high) in limits.items():
-        if not low <= params[key] <= high:
-            raise ValueError(f"{labels[key]}: допустимо от {low:g} до {high:g}.")
-
-
 def adjust_image_size(values, changed):
     labels = {key: label for key, label, _ in FIELDS}
     sizes = {key: read_number(values[key], labels[key], key.endswith("_res"))
              for key in SIZE_FIELDS}
-    check_limits(sizes, labels, {"w": (100, 10000), "h": (100, 10000),
-                                 "w_res": (200, 800), "h_res": (200, 800)})
+    if any(value <= 0 for value in sizes.values()):
+        raise ValueError("Размеры экрана и разрешение должны быть больше нуля.")
     if math.isclose(sizes["w"] / sizes["w_res"],
                     sizes["h"] / sizes["h_res"], rel_tol=1e-12):
         return values.copy(), ""
@@ -71,10 +65,8 @@ def adjust_image_size(values, changed):
     resolution = side + "_res"
     step = sizes[other] / sizes[other + "_res"]
 
-    low = max(200, math.ceil(100 / step - 1e-12))
-    high = min(800, math.floor(10000 / step + 1e-12))
     wanted = round(sizes[side] / step) if changed == resolution else sizes[resolution]
-    sizes[resolution] = min(high, max(low, wanted))
+    sizes[resolution] = max(1, wanted)
     sizes[side] = step * sizes[resolution]
 
     corrected = values.copy()
@@ -89,11 +81,8 @@ def adjust_image_size(values, changed):
 def read_light(values):
     labels = {key: label for key, label, _ in LIGHT_FIELDS}
     params = {key: read_number(values[key], label) for key, label in labels.items()}
-    check_limits(params, labels, {"xl": (-10000, 10000), "yl": (-10000, 10000),
-                                  "zl": (-10000, 10000), "i0": (0.01, 10000)})
-    length = math.hypot(params["dx"], params["dy"], params["dz"])
-    if length == 0 or not math.isfinite(length):
-        raise ValueError("Задайте ненулевой вектор направления света.")
+    if params["i0"] < 0:
+        raise ValueError("Сила излучения не может быть отрицательной.")
     return tuple(params[key] for key, _, _ in LIGHT_FIELDS)
 
 
@@ -116,8 +105,8 @@ def read_spectrum(text, reflection=False):
     if len(values) != len(core.WAVELENGTHS):
         raise ValueError("Нужна 41 строка: от 380 до 780 нм с шагом 10 нм.")
     spectrum = tuple(values[wave] for wave in core.WAVELENGTHS)
-    if not reflection and not 0 < core.integrate(spectrum) < math.inf:
-        raise ValueError("Интеграл спектра источника должен быть конечным и больше нуля.")
+    if not reflection and not math.isfinite(core.integrate(spectrum)):
+        raise ValueError("Интеграл спектра источника должен быть конечным.")
     return spectrum
 
 
@@ -125,29 +114,13 @@ def read_parameters(values, lights):
     labels = {key: label for key, label, _ in FIELDS}
     params = {key: read_number(values[key], label, key.endswith("_res"))
               for key, label in labels.items()}
-    check_limits(params, labels, {
-        "w": (100, 10000), "h": (100, 10000),
-        "w_res": (200, 800), "h_res": (200, 800),
-        "xc": (-10000, 10000), "yc": (-10000, 10000), "zc": (0, 10000),
-    })
-    if params["r"] <= 0:
-        raise ValueError("Радиус должен быть больше нуля.")
-    if math.hypot(params["xc"], params["yc"], params["zo"] - params["zc"]) <= params["r"]:
-        raise ValueError("Наблюдатель должен находиться вне сферы.")
+    if any(params[key] <= 0 for key in SIZE_FIELDS):
+        raise ValueError("Размеры экрана и разрешение должны быть больше нуля.")
+    if params["r"] < 0:
+        raise ValueError("Радиус не может быть отрицательным.")
     if not math.isclose(params["w"] / params["w_res"],
                         params["h"] / params["h_res"], rel_tol=1e-9):
         raise ValueError("Пиксели должны быть квадратными: W / Wres = H / Hres.")
-    if not core.is_sphere_in_view(params["xc"], params["yc"], params["zc"],
-                                   params["r"], params["zo"], params["w"], params["h"]):
-        raise ValueError("Сфера должна целиком помещаться в область видимости. "
-                         "Увеличьте экран, уменьшите радиус или измените положение сферы.")
-    if not lights:
-        raise ValueError("Добавьте хотя бы один источник света.")
-    for number, light in enumerate(lights, 1):
-        xl, yl, zl = light[:3]
-        if ((xl - params["xc"]) ** 2 + (yl - params["yc"]) ** 2
-                + (zl - params["zc"]) ** 2 <= params["r"] ** 2):
-            raise ValueError(f"Источник {number} должен находиться вне сферы.")
     params["lights"] = lights
     return params
 
@@ -169,10 +142,9 @@ def calculate(p):
     points = core.calc_all_points_on_sphere(
         p["xc"], p["yc"], p["zc"], p["r"], p["zo"],
         p["w"], p["h"], p["w_res"], p["h_res"])
-    if not points:
-        raise ValueError("На сферу не попал ни один пиксель. Увеличьте радиус или разрешение.")
     args = (p["lights"], p["xc"], p["yc"], p["zc"], p["r"], p["reflection"])
-    result = core.calc_images(*args, points)
+    inside = math.hypot(p["xc"], p["yc"], p["zo"] - p["zc"]) <= p["r"]
+    result = core.calc_images(*args, points, inside=inside)
     if not all(np.isfinite(result[key]).all() for key in ("rgb_1", "rgb_2")):
         raise ValueError("Яркость вышла за пределы числового диапазона.")
     pixels, maximum = core.convert_rgb_to_pixels(
@@ -182,16 +154,16 @@ def calculate(p):
                      for i, image in enumerate(pixels + gray)]
     result["maximum"] = maximum
 
-    indices = np.array(list(points), dtype=int)
+    indices = np.array(list(points), dtype=int).reshape(-1, 2)
     image_1, image_2 = (np.frombuffer(image, dtype=np.uint8).reshape(p["h_res"], p["w_res"], 3)
                         for image in pixels)
     differences = np.abs(image_1[indices[:, 0], indices[:, 1]].astype(np.int16)
                           - image_2[indices[:, 0], indices[:, 1]].astype(np.int16))
-    result["mae"] = float(differences.mean())
-    result["max_difference"] = int(differences.max())
+    result["mae"] = float(differences.mean()) if differences.size else 0.0
+    result["max_difference"] = int(differences.max(initial=0))
     result["points"] = points
     report_points = core.calc_report_points(p["xc"], p["yc"], p["zc"], p["r"], p["zo"])
-    samples = core.calc_images(*args, dict(enumerate(point for _, point in report_points)))
+    samples = core.calc_images(*args, dict(enumerate(point for _, point in report_points)), inside=inside)
     result["report_points"] = [(name, *point, samples["energy"][i],
                                  samples["luminance_1"][i], samples["luminance_2"][i])
                                 for i, (name, point) in enumerate(report_points)]
@@ -206,7 +178,10 @@ def result_text(result):
                                ("luminance_1", "L_v (image_1)", "кд/м²"),
                                ("luminance_2", "L_v (image_2)", "кд/м²")):
         values = result[key]
-        lines.append(f"{label}: min = {values.min():.6g}, max = {values.max():.6g} {units}")
+        if values.size:
+            lines.append(f"{label}: min = {values.min():.6g}, max = {values.max():.6g} {units}")
+        else:
+            lines.append(f"{label}: min = —, max = —")
     lines.extend((f"Разница RGB 0–255 по сфере: средняя = {result['mae']:.4g}, "
                   f"максимальная = {result['max_difference']}",
                   "Точка        x, мм     y, мм     z, мм      L_e, Вт/(м²·ср)    L_v1, кд/м²    L_v2, кд/м²"))
@@ -364,7 +339,7 @@ class LabWindow:
             position = tuple(read_number(self.light_values[key].get(), key) for key in ("xl", "yl", "zl"))
             direction = tuple(c - p for c, p in zip(center, position))
             if math.hypot(*direction) == 0:
-                raise ValueError("Источник находится в центре сферы.")
+                return
             direction = core.unit(direction)
         except ValueError as exc:
             messagebox.showerror("Ошибка", str(exc), parent=self.root)
@@ -497,7 +472,7 @@ class LabWindow:
             self.result = result
             self.save_button.configure(state="normal")
             self.status.set("Готово. " + correction)
-        except (ValueError, ArithmeticError, tk.TclError) as exc:
+        except (ValueError, ArithmeticError, MemoryError, tk.TclError) as exc:
             self.status.set("Расчёт не выполнен.")
             messagebox.showerror("Ошибка", str(exc), parent=self.root)
 
