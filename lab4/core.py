@@ -1,0 +1,359 @@
+from math import acos, cos, hypot, pi, sin, sqrt
+
+import numpy as np
+from scipy.optimize import lsq_linear
+
+
+DIFFERENCES = np.diff(np.eye(41), n=2, axis=0)
+
+
+WAVELENGTHS = tuple(range(380, 781, 10))
+
+
+WEIGHTS = (5,) + (10,) * 39 + (5,)
+
+
+CIE_XYZ = (
+    (0.0014, 0.0, 0.0065),
+    (0.0042, 0.0001, 0.0201),
+    (0.0143, 0.0004, 0.0679),
+    (0.0435, 0.0012, 0.2074),
+    (0.1344, 0.004, 0.6456),
+    (0.2839, 0.0116, 1.3856),
+    (0.3483, 0.023, 1.7471),
+    (0.3362, 0.038, 1.7721),
+    (0.2908, 0.06, 1.6692),
+    (0.1954, 0.091, 1.2876),
+    (0.0956, 0.139, 0.813),
+    (0.032, 0.208, 0.4652),
+    (0.0049, 0.323, 0.272),
+    (0.0093, 0.503, 0.1582),
+    (0.0633, 0.71, 0.0782),
+    (0.1655, 0.862, 0.0422),
+    (0.2904, 0.954, 0.0203),
+    (0.4334, 0.995, 0.0087),
+    (0.5945, 0.995, 0.0039),
+    (0.7621, 0.952, 0.0021),
+    (0.9163, 0.87, 0.0017),
+    (1.0263, 0.757, 0.0011),
+    (1.0622, 0.631, 0.0008),
+    (1.0026, 0.503, 0.0003),
+    (0.8544, 0.381, 0.0002),
+    (0.6424, 0.265, 0.0),
+    (0.4479, 0.175, 0.0),
+    (0.2835, 0.107, 0.0),
+    (0.1649, 0.061, 0.0),
+    (0.0874, 0.032, 0.0),
+    (0.0468, 0.017, 0.0),
+    (0.0227, 0.0082, 0.0),
+    (0.0114, 0.0041, 0.0),
+    (0.0058, 0.0021, 0.0),
+    (0.0029, 0.001, 0.0),
+    (0.0014, 0.0005, 0.0),
+    (0.0007, 0.0002, 0.0),
+    (0.0003, 0.0001, 0.0),
+    (0.0002, 0.0001, 0.0),
+    (0.0001, 0.0, 0.0),
+    (0.0, 0.0, 0.0),
+)
+
+
+D65 = (
+    49.9755, 54.6482, 82.7549, 91.486, 93.4318, 86.6823,
+    104.865, 117.008, 117.812, 114.861, 115.923, 108.811,
+    109.354, 107.802, 104.79, 107.689, 104.405, 104.046,
+    100.0, 96.3342, 95.788, 88.6856, 90.0062, 89.5991,
+    87.6987, 83.2886, 83.6992, 80.0268, 80.2146, 82.2778,
+    78.2842, 69.7213, 71.6091, 74.349, 61.604, 69.8856,
+    75.087, 63.5927, 46.4182, 66.8054, 63.3828,
+)
+
+
+RGB_TO_XYZ = tuple(tuple(value / 0.17697 for value in row) for row in (
+    (0.49, 0.31, 0.20),
+    (0.17697, 0.81240, 0.01063),
+    (0.0, 0.01, 0.99),
+))
+
+
+XYZ_TO_RGB = (
+    (0.41846571242189451, -0.158660784803799, -0.082834927618095466),
+    (-0.091168963909022724, 0.25243144213946506, 0.015707521769557604),
+    (0.00092089862534366364, -0.0025498125468632832, 0.17859891392151958),
+)
+
+
+XYZ_TO_SRGB = (
+    (3.2406255, -1.5372080, -0.4986286),
+    (-0.9689307, 1.8757561, 0.0415175),
+    (0.0557101, -0.2040211, 1.0569959),
+)
+
+
+RGB_TO_XYZ = np.array(RGB_TO_XYZ)
+
+
+XYZ_TO_RGB = np.array(XYZ_TO_RGB)
+
+
+XYZ_TO_SRGB = np.array(XYZ_TO_SRGB)
+
+
+XYZ_WEIGHTS = np.array(CIE_XYZ) * np.array(WEIGHTS)[:, None]
+
+
+# Скалярное произведение векторов.
+def dot(a, b):
+    return sum(x * y for x, y in zip(a, b))
+
+
+# Единичный вектор направления.
+def unit(vector):
+    length = hypot(*vector)
+    if length == 0:
+        return tuple(0.0 for _ in vector)
+    return tuple(value / length for value in vector)
+
+
+# Матричное преобразование цветовых координат.
+def multiply(matrix, vector):
+    return np.asarray(vector) @ np.asarray(matrix).T
+
+
+# Интегрирование спектра методом трапеций, 380–780 нм.
+def integrate(spectrum):
+    return np.asarray(spectrum) @ WEIGHTS
+
+
+# Нормировка спектра источника по интегралу.
+def normalize_spectrum(spectrum):
+    total = integrate(spectrum)
+    if total == 0:
+        return (0.0,) * len(WAVELENGTHS)
+    return tuple(value / total for value in spectrum)
+
+
+# Спектр → XYZ; кривые стандартного наблюдателя CIE.
+def spectrum_to_xyz(spectrum):
+    return np.asarray(spectrum) @ XYZ_WEIGHTS
+
+
+# Спектр → XYZ → CIE RGB 1931.
+def spectrum_to_rgb(spectrum):
+    return multiply(XYZ_TO_RGB, spectrum_to_xyz(spectrum))
+
+
+# Коэффициент диффузного отражения RGB: RGB(D65 × Kd) / RGB(D65).
+def reflection_to_rgb(reflection):
+    white = spectrum_to_rgb(D65)
+    reflected = spectrum_to_rgb(tuple(light * kd for light, kd in zip(D65, reflection)))
+    return tuple(value / reference for value, reference in zip(reflected, white))
+
+
+# Наблюдатель, направление взгляда и плоскость экрана через центр сферы.
+def camera_frame(xc, yc, zc, zo):
+    observer = np.array((0.0, 0.0, zo))
+    center = np.array((xc, yc, zc), dtype=float)
+    forward = np.array(unit(center - observer))
+    if not np.any(forward):
+        forward = np.array((0.0, 0.0, -1.0))
+    axis_x = np.array((1.0, 0.0, 0.0))
+    if abs(dot(axis_x, forward)) > 0.999999:
+        axis_x = np.array((0.0, 1.0, 0.0))
+    axis_x = np.array(unit(axis_x - dot(axis_x, forward) * forward))
+    axis_y = np.cross(axis_x, forward)
+    distance = hypot(xc, yc, zc - zo)
+    return observer, forward, axis_x, axis_y, distance
+
+
+# Пересечение лучей со сферой; ближайший положительный корень.
+def intersect_sphere(observer, directions, center, r):
+    directions = np.asarray(directions, dtype=float)
+    toward_center = np.asarray(center) - observer
+    projection = directions @ toward_center
+    perpendicular = np.cross(directions, toward_center)
+    discriminant = r ** 2 - np.sum(perpendicular ** 2, axis=-1)
+    root = np.sqrt(np.maximum(discriminant, 0))
+    near, far = projection - root, projection + root
+    epsilon = 1e-10 * max(1, r)
+    distance = np.where(near > epsilon, near, far)
+    valid = (r > 0) & (discriminant >= 0) & (distance > epsilon)
+    return distance, valid
+
+
+# Точка сферы, видимая через заданную точку экрана.
+def ray_sphere_point(x, y, zo, xc, yc, zc, r):
+    observer, forward, axis_x, axis_y, distance = camera_frame(xc, yc, zc, zo)
+    focal = distance if distance > 0 else max(r, 1)
+    direction = np.array(unit(focal * forward + x * axis_x + y * axis_y))
+    t, valid = intersect_sphere(observer, direction, (xc, yc, zc), r)
+    return tuple(observer + t * direction) if valid else None
+
+
+# Видимая поверхность сферы; координаты центров пикселей.
+def calc_all_points_on_sphere(xc, yc, zc, r, zo, w, h, w_res, h_res):
+    observer, forward, axis_x, axis_y, distance = camera_frame(xc, yc, zc, zo)
+    x = -h / 2 + (np.arange(h_res)[:, None] + 0.5) * (h / h_res)
+    y = -w / 2 + (np.arange(w_res)[None, :] + 0.5) * (w / w_res)
+    focal = distance if distance > 0 else max(r, 1)
+    directions = (focal * forward + x[..., None] * axis_x + y[..., None] * axis_y)
+    directions /= np.linalg.norm(directions, axis=-1, keepdims=True)
+    t, visible = intersect_sphere(observer, directions, (xc, yc, zc), r)
+    rows, columns = np.nonzero(visible)
+    coordinates = observer + t[visible, None] * directions[visible]
+    return dict(zip(zip(rows.tolist(), columns.tolist()), coordinates.tolist()))
+
+
+# Ламбертовская диаграмма излучения и отражение: I0 cosα cosθ / (πR²).
+def calc_light_factor(point, light, xc, yc, zc, r, inside=False):
+    point = np.asarray(point)
+    xl, yl, zl, i0, dx, dy, dz, _ = light
+    if r == 0 or (inside and hypot(xl - xc, yl - yc, zl - zc) > r):
+        return np.zeros(point.shape[:-1])
+    n = (point - (xc, yc, zc)) / r
+    if inside:
+        n = -n
+    to_light = (xl, yl, zl) - point
+    distance_squared = np.sum(to_light ** 2, axis=-1)
+    s = np.divide(to_light, np.sqrt(distance_squared)[..., None],
+                   out=np.zeros_like(to_light, dtype=float), where=distance_squared[..., None] > 0)
+    direction = unit((dx, dy, dz))
+    cos_alpha = np.clip(-np.sum(s * direction, axis=-1), 0, 1)
+    cos_theta = np.clip(np.sum(s * n, axis=-1), 0, 1)
+
+    return np.divide(10 ** 6 * i0 * cos_alpha * cos_theta, pi * distance_squared,
+                     out=np.zeros_like(distance_squared, dtype=float), where=distance_squared > 0)
+
+
+# Гамма-кодирование sRGB; мониторные значения 0–255.
+def encode_srgb(value):
+    value = np.clip(value, 0, 1)
+    encoded = np.where(value <= 0.0031308, 12.92 * value, 1.055 * value ** (1 / 2.4) - 0.055)
+    return np.rint(255 * encoded).astype(np.uint8)
+
+
+# Три точки сферы для отчёта: ближняя, −X, +X.
+def calc_report_points(xc, yc, zc, r, zo):
+    to_observer = (-xc, -yc, zo - zc)
+    _, _, axis_x, _, distance = camera_frame(xc, yc, zc, zo)
+    if r <= 0:
+        return []
+    if distance <= r:
+        focal = distance if distance > 0 else max(r, 1)
+        result = []
+        for name, x in (("Ближняя", 0), ("-X", -focal / sqrt(3)), ("+X", focal / sqrt(3))):
+            point = ray_sphere_point(x, 0, zo, xc, yc, zc, r)
+            if point is not None:
+                result.append((name, point))
+        return result
+    v = unit(to_observer)
+    angle = min(pi / 6, acos(r / distance) / 2)
+    result = []
+    for name, theta in (("Ближняя", 0), ("-X", -angle), ("+X", angle)):
+        normal = tuple(cos(theta) * vi + sin(theta) * ai for vi, ai in zip(v, axis_x))
+        point = tuple(center + r * ni for center, ni in zip((xc, yc, zc), normal))
+        result.append((name, point))
+    return result
+
+
+# Белый материал по условию: спектр D65 в диапазоне коэффициентов отражения 0–1.
+def default_reflection():
+    return np.asarray(D65) / max(D65)
+
+
+# RGB → XYZ → спектр; минимум кривизны, неотрицательность и сохранение энергии источника.
+def rgb_to_spectrum(rgb, reflection=False):
+    rgb = np.asarray(rgb, dtype=float)
+    if not np.any(rgb):
+        return np.zeros(len(WAVELENGTHS))
+    if reflection and np.max(np.abs(rgb - rgb[0])) < 1e-12 and -1e-12 <= rgb[0] <= 1 + 1e-12:
+        return np.full(len(WAVELENGTHS), np.clip(rgb[0], 0, 1))
+    matrix = XYZ_WEIGHTS.T.copy()
+    if reflection:
+        matrix *= np.asarray(D65)
+        target = multiply(RGB_TO_XYZ, rgb * spectrum_to_rgb(D65))
+    else:
+        target = multiply(RGB_TO_XYZ, rgb)
+    scales = np.linalg.norm(matrix, axis=1)
+    matrix /= scales[:, None]
+    target /= scales
+    if not reflection:
+        energy = np.asarray(WEIGHTS, dtype=float)
+        matrix = np.vstack((matrix, energy / np.linalg.norm(energy)))
+        target = np.append(target, 1 / np.linalg.norm(energy))
+    system = np.vstack((1e6 * matrix, DIFFERENCES, 1e-5 * np.eye(len(WAVELENGTHS))))
+    right = np.concatenate((1e6 * target, np.zeros(len(DIFFERENCES) + len(WAVELENGTHS))))
+    solution = lsq_linear(system, right, bounds=(0, 1 if reflection else np.inf),
+                          method="bvls", tol=1e-12, max_iter=1000)
+    if not solution.success or not np.all(np.isfinite(solution.x)):
+        raise ArithmeticError("Не удалось восстановить спектр из заданного RGB.")
+    spectrum = solution.x
+    if not reflection:
+        total = integrate(spectrum)
+        if total:
+            spectrum /= total
+    return spectrum
+
+
+# Восстановление спектрального представления всех источников и поверхности из данных RGB.
+def restore_scene(lights, reflection_rgb):
+    spectra = np.array([rgb_to_spectrum(light[-1]) for light in lights])
+    spectra = spectra.reshape(-1, len(WAVELENGTHS))
+    reflection = rgb_to_spectrum(reflection_rgb, reflection=True)
+    return spectra, reflection
+
+
+# Спектральное изображение image_A и два эталонных расчёта lab3 на одной геометрии.
+def calc_images(lights, xc, yc, zc, r, original_spectra, original_reflection,
+                restored_spectra, restored_reflection, points, inside=False):
+    coordinates = np.asarray(list(points.values()), dtype=float).reshape(-1, 3)
+    factors = np.empty((len(coordinates), len(lights)))
+    for i, light in enumerate(lights):
+        factors[:, i] = calc_light_factor(coordinates, light, xc, yc, zc, r, inside)
+    original_spectra = np.asarray(original_spectra).reshape(-1, len(WAVELENGTHS))
+    spectral_1 = (factors @ original_spectra) * original_reflection
+    xyz_1 = spectrum_to_xyz(spectral_1)
+    rgb_1 = multiply(XYZ_TO_RGB, xyz_1)
+    rgb_2 = (factors @ spectrum_to_rgb(original_spectra)) * reflection_to_rgb(original_reflection)
+    spectral_A = (factors @ restored_spectra) * restored_reflection
+    xyz_A = spectrum_to_xyz(spectral_A)
+    rgb_A = multiply(XYZ_TO_RGB, xyz_A)
+    return {"spectral_A": spectral_A, "rgb_A": rgb_A, "rgb_1": rgb_1, "rgb_2": rgb_2,
+            "energy_A": integrate(spectral_A), "energy_1": integrate(spectral_1),
+            "luminance_A": 683 * xyz_A[:, 1], "luminance_1": 683 * xyz_1[:, 1],
+            "luminance_2": 683 * (rgb_2 @ RGB_TO_XYZ[1])}
+
+
+# Сравнение спектрограмм и проверка обратного преобразования восстановленного спектра в RGB.
+def compare_spectra(original, restored, target_rgb, reflection=False):
+    difference = np.asarray(restored) - original
+    rgb = np.asarray(reflection_to_rgb(restored) if reflection else spectrum_to_rgb(restored))
+    return {"rms": float(np.sqrt(np.mean(difference ** 2))),
+            "max_difference": float(np.max(np.abs(difference))), "rgb": rgb,
+            "rgb_error": float(np.max(np.abs(rgb - target_rgb)))}
+
+
+# CIE RGB → XYZ → sRGB; единая нормировка трёх изображений для сравнения яркости.
+def convert_rgb_to_pixels(images, points, w_res, h_res):
+    monitor = [multiply(XYZ_TO_SRGB, multiply(RGB_TO_XYZ, image)) for image in images]
+    maximum = max((float(image.max(initial=0)) for image in monitor), default=0)
+    indices = np.array(list(points), dtype=int).reshape(-1, 2)
+    result = []
+    for image in monitor:
+        pixels = np.zeros((h_res, w_res, 3), dtype=np.uint8)
+        if maximum:
+            pixels[indices[:, 0], indices[:, 1]] = encode_srgb(image / maximum)
+        result.append(bytearray(pixels.tobytes()))
+    return result, maximum
+
+
+# Средняя и максимальная абсолютная разница каналов RGB; чёрный фон исключён.
+def compare_images(first, second, points, w_res, h_res):
+    if not points:
+        return 0.0, 0
+    indices = np.array(list(points), dtype=int)
+    first = np.frombuffer(first, dtype=np.uint8).reshape(h_res, w_res, 3)
+    second = np.frombuffer(second, dtype=np.uint8).reshape(h_res, w_res, 3)
+    difference = np.abs(first[indices[:, 0], indices[:, 1]].astype(np.int16)
+                        - second[indices[:, 0], indices[:, 1]].astype(np.int16))
+    return float(difference.mean()), int(difference.max())
